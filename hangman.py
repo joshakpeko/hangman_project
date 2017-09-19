@@ -13,138 +13,163 @@ from collections import namedtuple
 import re
 
 
-Player = namedtuple('Player', 'name ngames nwins score level')
+Player = namedtuple('Player', 'name ngames wins score level')
+Report = namedtuple('Report', 'word tracker counter proposals')
+alpha_regex = re.compile(r'[A-Za-z]+')
 
 
 class GameSession:
     """Class for a player game session."""
 
-    _DEFAULT_DICT = 'fr_dict'
-    _ATTEMPTS = 12
-    _SCORE_INC_AMOUNT = 3
-    _PLAYER_LEVELS = ['novice', 'average', 'pro', 'expert', 'godhead']
-
+    __dict_list = ['fr_dict', 'eng_dict']
+    __attempts = 12
+    __score_inc = 3
+    __levels = ['novice', 'average', 'pro', 'expert', 'godhead']
 
     def __init__(self, player_name):
         """Open a new session for the player.
         Retrieve player stats from database or create a new ones."""
 
-        self._player = Player(player_name, 0, 0, 0, 'novice')
+        # search player_name in players database
+        # if not found create new one
         with shelve.open('scores') as db:
             try:
-                self._player = db[self._player.name]
+                player = db[player_name]
             except KeyError:
-                db[self._player.name] = self._player
+                player = Player(player_name, 0, 0, 0, 'novice')
+                db[player_name] = player
+            finally:
+                self.__player = player
+
+        # dispatch player stats for further update
+        (self.__p_name, self.__p_ngames, self.__p_wins,
+         self.__p_score, self.__p_level) = self.__player
+
+        # 'fr_dict' as default dictionary
+        self.__default_dict = self.__dict_list[0]
 
     @property
     def player(self):
-        return self._player
+        return self.__player
+
+    @property
+    def default_dict(self):
+        return self.__default_dict
+
+    @default_dict.setter
+    def default_dict(self, dict_name):
+        if dict_name in self.__dict_list:
+            self.__default_dict = dict_name
+        else:
+            raise ValueError('unknow dictionary : %s' % dict_name)
 
     def pick_word(self, dico=None):
-        """Pick a new word in database. Return it coupled with a tracker"""
+        """Return a new word picked in database, along with
+        the normal form (NFD) of the word plus a blind tracker"""
 
-        if dico is None: dico = self._DEFAULT_DICT
+        if dico is None: dico = self.default_dict
         with shelve.open('./words') as db:
             try:
-                word = ''.join(random.sample(db[dico], 1))
+                word = random.choice(db[dico])
             except KeyError as exc:
                 exc.args = ('dictionnary not found',)
                 raise exc
             else:
-                alpha_regex = re.compile(r'\w+')
-                spaced_word = ' '.join(list(word))
-                spaced_tracker = alpha_regex.sub('_', spaced_word)
-                tracker = spaced_tracker.replace(' ', '')
-            return (word, tracker)
+                norm_word = unicodedata.normalize('NFD', word)
+                norm_word = ''.join(c for c in norm_word
+                                    if not unicodedata.combining(c))
+                spaced_letters = ' '.join(list(norm_word))
+                tracker = alpha_regex.sub('_', spaced_letters)
+                tracker = tracker.replace(' ', '')
+            return (word, norm_word, tracker)
 
-    def validate(self, letter_or_word):
-        """Raise ValueError if letter_or_word contains a non-
-        alphabetic character. Return True otherwise."""
+    def _validate(self, char):
+        """Raise ValueError if char contains a non-
+        alphabetic character. Return char otherwise."""
 
-        if not str(letter_or_word).isalpha():
+        if not str(char).isalpha():
             raise ValueError('non-alphabetic character found')
-        return True
+        return char
 
-    def starter(self, dico=None):
-        """Coroutine that introduces a new word and receive the
-        player proposals at each turn until the end of the round."""
+    def pinger(self, dico=None):
+        """Coroutine that represents a game round.
+        Introduce a new word and receive the player proposals 
+        at each turn until its end."""
 
-        Report = namedtuple('Report', 
-                            'word tracker counter proposals')
-        word, tracker = self.pick_word(dico)
-        proposals = set()
-        counter = self._ATTEMPTS
-        key = None      # determine weither the player wins or looses round
+        word, norm_word, tracker = self.pick_word(dico)
+        proposals = set()   # keep player letter/word proposals
+        counter = self.__attempts
+        key_wl = None       # whether the player wins round or not
 
+        print(word) # debug
         while True:
             report = Report('*', tracker, counter, proposals)
-            letter_or_word = yield report
-            if letter_or_word is None:
+            char = yield report
+            if char is None:
                 break
+
             try:
-                self.validate(letter_or_word)
+                char = self._validate(char)
             except ValueError:
                 counter -= 1
             else:
-                if letter_or_word not in proposals:
+                if char not in proposals:
                     counter -= 1
-                    proposals.add(letter_or_word)
-                    components = (word, letter_or_word, tracker)
-                    tracker = self._update_tracker(*components)
+                    proposals.add(char)
+                    args = (word, norm_word, char, tracker)
+                    tracker = self._update_tracker(*args )
 
                 if tracker == word:
-                    key = 'win'
+                    key_wl = 1          # win
                 elif counter == 0:
-                    key = 'loose'
-                if key:
-                    self._update_player_stats(key=key)
-                    break
+                    key_wl = -1         # loss
 
+                if key_wl:
+                    self._update_playerstats(key_wl)
+                    break
         return Report(word, tracker, counter, proposals)
 
-    def _update_tracker(self, *components):
+    def _update_tracker(self, *args ):
         """Update and return a tracker based on a word to find 
         and a proposed letter or word."""
 
-        hidden_word, letter_or_word, tracker = components
-        asciis = []
+        word, norm_word, char, tracker = args 
+        # compare normalized versions of both word and char
+        norm_char = unicodedata.normalize('NFD', char)
+        norm_char = ''.join(c for c in norm_char 
+                            if not unicodedata.combining(c))
 
-        # get a 'only ascii' version of both letter_or_word
-        # and the hidden_word so that we can easily compare
-        for word in [hidden_word, letter_or_word]:
-            word = unicodedata.normalize('NFD', word)
-            word = ''.join(char for char in word if not unicodedata.
-                                                        combining(char))
-            asciis.append(word)
-
-        ascii_hidden_word, ascii_letter_or_word = asciis
-
-        if len(letter_or_word) == 1:
+        if len(char) == 1:
             tracker = list(tracker)
-            for i, char in enumerate(ascii_hidden_word):
-                if char == ascii_letter_or_word:    # letter match found
-                    tracker[i] = hidden_word[i]
+            for i, c in enumerate(norm_word):
+                if c == norm_char:    # letter match found
+                    tracker[i] = word[i]
             tracker = ''.join(tracker)
 
-        elif ascii_letter_or_word == ascii_hidden_word:
-            tracker = hidden_word
+        elif norm_char == norm_word:
+            tracker = word
 
         return tracker
 
-    def _update_player_stats(self, key):
+    def _update_playerstats(self, key):
         """Update player stats in database."""
 
+        self.__p_ngames += 1
+
+        if key == 1:
+            self.__p_wins += 1
+            self.__p_score += self.__score_inc
+
+        if self.__p_ngames > 5:
+            average = self.__p_wins / self.__p_ngames
+            average_id = int(average * len(self.__levels))
+            self.__p_level = self.__levels[average_id]
+
+        self.__player = Player(self.__p_name, self.__p_ngames,
+                self.__p_wins, self.__p_score, self.__p_level)
+
+    def save_stats(self):
+        """Write player updated stats to database."""
+
         with shelve.open('./scores') as db:
-            name, games, wins, score, level = db[self._player.name]
-            games += 1
-            if key == 'win':
-                wins += 1
-                score += self._SCORE_INC_AMOUNT
-            if games > 5:   # level update from 5 games played
-                average = wins / games
-                average_id = int(average * len(self._PLAYER_LEVELS))
-                level = self._PLAYER_LEVELS[average_id]
-            
-            new_stats = Player(name, games, wins, score, level)
-            db[self._player.name] = new_stats
-            self._player = new_stats
+            db[self.__p_name] = self.__player
