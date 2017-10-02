@@ -9,19 +9,15 @@
 import shelve
 import random
 import unicodedata
-from collections import namedtuple
-import re
+import sys
 
-
-Player = namedtuple('Player', 'name ngames wins score level')
-Report = namedtuple('Report', 'word tracker counter proposals')
-alpha_regex = re.compile(r'[A-Za-z]+')
+from utilities import (Player, Report, alpha_regex, words_db_init, dicts)
 
 
 class GameSession:
     """Class for a player game session."""
 
-    __dict_list = ['fr_dict', 'eng_dict']
+    __dict_list = sorted(dicts)
     __attempts = 12
     __score_inc = 3
     __levels = ['novice', 'average', 'pro', 'expert', 'godhead']
@@ -91,7 +87,7 @@ class GameSession:
             raise ValueError('non-alphabetic character found')
         return char
 
-    def pinger(self, dico=None):
+    def hanger(self, dico=None):
         """Coroutine that represents a game round.
         Introduce a new word and receive the player proposals 
         at each turn until its end."""
@@ -101,7 +97,7 @@ class GameSession:
         counter = self.__attempts
         key_wl = None       # whether the player wins round or not
 
-        print(word) # debug
+        #print(word) # debug
         while True:
             report = Report('*', tracker, counter, proposals)
             char = yield report
@@ -173,3 +169,8 @@ class GameSession:
 
         with shelve.open('./scores') as db:
             db[self.__p_name] = self.__player
+
+    def exit(self):
+        """Execute `save_stats()` and exit the interpreter."""
+        self.save_stats()
+        sys.exit()
